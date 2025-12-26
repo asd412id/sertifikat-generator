@@ -1,0 +1,6 @@
+.next/cache
+.next/static/chunks/polyfills
+.next/static/webpack
+.dev
+.env*
+*.log

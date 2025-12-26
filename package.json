@@ -9,12 +9,17 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "culori": "^4.0.2",
+    "dompurify": "^3.3.1",
+    "html2canvas": "^1.4.1",
+    "jspdf": "^3.0.4",
     "next": "16.1.1",
     "react": "19.2.3",
     "react-dom": "19.2.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/culori": "^4.0.1",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
