@@ -1,6 +1,6 @@
-# Sertifikat2 – AI Certificate Background Generator
+# Sertifikat Generator – AI Certificate Background Generator
 
-Sertifikat2 adalah aplikasi Next.js yang membantu Anda membuat latar sertifikat landscape premium langsung dari browser. Pengguna menuliskan instruksi sertifikat, memilih model AI (OpenRouter atau Z.AI), lalu menerima HTML dekoratif yang aman dicetak dan siap diunduh sebagai PDF, PNG, atau JPG. Semua permintaan AI stateless sehingga setiap generasi benar-benar baru tanpa riwayat percakapan. @app/page.tsx#152-424
+Sertifikat Generator adalah aplikasi Next.js yang membantu Anda membuat latar sertifikat landscape premium langsung dari browser. Pengguna menuliskan instruksi sertifikat, memilih model AI (OpenRouter atau Z.AI), lalu menerima HTML dekoratif yang aman dicetak dan siap diunduh sebagai PDF, PNG, atau JPG. Semua permintaan AI stateless sehingga setiap generasi benar-benar baru tanpa riwayat percakapan. @app/page.tsx#152-424
 
 ## Fitur Utama
 
