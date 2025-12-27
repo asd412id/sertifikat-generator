@@ -3,3 +3,8 @@
 
 [[plugins]]
   package = "@netlify/plugin-nextjs"
+
+[functions]
+  timeout = 30
+  node_bundler = "esbuild"
+  external_node_modules = ["next"]

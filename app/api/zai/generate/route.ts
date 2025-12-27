@@ -40,19 +40,34 @@ async function callZai(args: {
 
   const base = typeof envBase === "string" && envBase ? envBase : defaultBase;
 
-  return fetch(`${base}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${args.apiKey}`,
-      "Content-Type": "application/json",
-      "Accept-Language": "en-US,en",
-      Accept: "application/json",
-      "Referer": "http://localhost:3000",
-      "Origin": "http://localhost:3000",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    },
-    body: JSON.stringify(args.body),
-  });
+  // Gunakan AbortController untuk timeout (30 detik)
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+  try {
+    const response = await fetch(`${base}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${args.apiKey}`,
+        "Content-Type": "application/json",
+        "Accept-Language": "en-US,en",
+        Accept: "application/json",
+        // Hapus Referer dan Origin yang hardcoded untuk production
+        // Gunakan User-Agent yang valid
+        "User-Agent": "SertifikatGenerator/1.0",
+      },
+      body: JSON.stringify(args.body),
+      signal: controller.signal,
+      // Tambahkan revalidate untuk production
+      next: { revalidate: 0 },
+    });
+
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    throw error;
+  }
 }
 
 function buildSystemInstruction() {
@@ -209,6 +224,30 @@ export async function POST(req: Request) {
     console.error("Z.AI API call failed:", error);
 
     const err = error as any;
+
+    // Handle specific error types
+    if (err.name === 'AbortError') {
+      return NextResponse.json(
+        {
+          error: "Z.AI timeout",
+          details: "Request took too long (>30s)",
+          hint: "Coba generate ulang atau gunakan model yang lebih cepat. Pastikan koneksi internet stabil."
+        },
+        { status: 504 }
+      );
+    }
+
+    if (err.message?.includes('fetch failed') || err.message?.includes('ECONNREFUSED')) {
+      return NextResponse.json(
+        {
+          error: "Network error",
+          details: "Cannot connect to Z.AI API",
+          hint: "Pastikan environment variables ZAI_BASE_URL dan API key sudah benar di Netlify. Cek juga koneksi internet server."
+        },
+        { status: 502 }
+      );
+    }
+
     return NextResponse.json(
       {
         error: err.message || "Internal server error",

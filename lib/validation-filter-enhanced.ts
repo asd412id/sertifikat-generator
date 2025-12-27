@@ -1,6 +1,6 @@
 /**
- * HTML Filter Utilities
- * Filter backticks and other artifacts from AI-generated HTML
+ * HTML Filter Utilities - Enhanced Version
+ * Filter backticks, penjelasan AI, dan extract HTML murni
  */
 
 /**

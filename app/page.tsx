@@ -9,7 +9,7 @@ import { createRandomDesign, type DesignState } from "@/lib/design";
 import { exportElementAsImage, exportElementAsPdf } from "@/lib/export";
 import { getTemplate, getDefaultInstruction } from "@/lib/prompt-templates";
 import { validateHtmlStructure, analyzeHtmlQuality, extractMetadata, withRetry, getFallbackTemplate } from "@/lib/validation";
-import { filterBackticks, extractHtmlFromAiResponse } from "@/lib/validation-filter";
+import { filterBackticks, extractPureHtml } from "@/lib/validation-filter";
 
 // Reuse color sanitization helper from export.ts
 function replaceUnsupportedCssColors(input: string) {
@@ -526,8 +526,8 @@ export default function Page() {
       });
 
       const rawHtml = typeof result.html === "string" ? result.html : "";
-      // Filter backticks dari hasil AI
-      const filteredHtml = filterBackticks(rawHtml);
+      // Extract pure HTML from AI response (remove backticks and explanations)
+      const filteredHtml = extractPureHtml(rawHtml);
       const validation = validateHtmlStructure(filteredHtml);
 
       if (!validation.isValid) {

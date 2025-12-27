@@ -36,26 +36,38 @@ async function callOpenRouter(args: {
   model: string;
   messages: Array<{ role: string; content: string }>;
 }) {
-  return fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${args.apiKey}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      // Optional but recommended by OpenRouter.
-      "HTTP-Referer": "http://localhost",
-      "X-Title": "Sertifikat2",
-    },
-    body: JSON.stringify({
-      model: args.model,
-      messages: args.messages,
-      stream: false,
-      // max_tokens: OPENROUTER_MAX_TOKENS,
-      // // Some upstream providers behind OpenRouter are stricter than OpenAI's usual range.
-      // // Keep output bounded to reduce latency and avoid overly long HTML.
-      temperature: OPENROUTER_TEMPERATURE,
-    }),
-  });
+  // Gunakan AbortController untuk timeout (30 detik)
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${args.apiKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        // Optional but recommended by OpenRouter.
+        "HTTP-Referer": "https://sertifikat-generator.netlify.app",
+        "X-Title": "Sertifikat Generator",
+        "User-Agent": "SertifikatGenerator/1.0",
+      },
+      body: JSON.stringify({
+        model: args.model,
+        messages: args.messages,
+        stream: false,
+        temperature: OPENROUTER_TEMPERATURE,
+      }),
+      signal: controller.signal,
+      next: { revalidate: 0 },
+    });
+
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    throw error;
+  }
 }
 
 function extractUpstreamErrorMessage(detailsText: string) {
