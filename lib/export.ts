@@ -80,56 +80,116 @@ function downloadBlob(blob: Blob, filename: string) {
   }
 }
 
-function measureMaxContentExtent(root: HTMLElement) {
-  const rootRect = root.getBoundingClientRect();
-  let maxRight = rootRect.right;
-  let maxBottom = rootRect.bottom;
+// Fungsi untuk mendapatkan ukuran kertas yang tepat
+function getPaperDimensions(paperSize?: "a4" | "f4") {
+  if (paperSize === "f4") {
+    return {
+      widthMm: 330,
+      heightMm: 215,
+      widthPx: 1200,
+      heightPx: 764,
+    };
+  }
 
+  return {
+    widthMm: 275,
+    heightMm: 210,
+    widthPx: 1200,
+    heightPx: 850,
+  };
+}
+
+// Fungsi untuk mengukur konten dengan lebih akurat
+function measureContentExtent(root: HTMLElement, paperSize?: "a4" | "f4") {
+  const paper = getPaperDimensions(paperSize);
+
+  // Gunakan ukuran dari paper spec sebagai base
+  const baseWidth = paper.widthPx;
+  const baseHeight = paper.heightPx;
+
+  // Cek apakah konten melebihi batas
+  const rootRect = root.getBoundingClientRect();
   const nodes = root.querySelectorAll<HTMLElement>("*");
+
+  let maxRight = 0;
+  let maxBottom = 0;
+  let hasOverflow = false;
+
   for (const el of Array.from(nodes)) {
     const rect = el.getBoundingClientRect();
     if (rect.right > maxRight) maxRight = rect.right;
     if (rect.bottom > maxBottom) maxBottom = rect.bottom;
+
+    // Cek overflow
+    if (rect.right > rootRect.right + 10 || rect.bottom > rootRect.bottom + 10) {
+      hasOverflow = true;
+    }
   }
 
   const extraW = Math.max(0, Math.ceil(maxRight - rootRect.right));
   const extraH = Math.max(0, Math.ceil(maxBottom - rootRect.bottom));
 
+  // Jika ada overflow, gunakan base size yang lebih besar
+  if (hasOverflow) {
+    console.warn("Content overflow detected, adjusting dimensions...");
+    return {
+      width: Math.max(baseWidth, Math.ceil(rootRect.width) + extraW),
+      height: Math.max(baseHeight, Math.ceil(rootRect.height) + extraH),
+      hasOverflow: true,
+    };
+  }
+
   return {
     width: Math.ceil(rootRect.width) + extraW,
     height: Math.ceil(rootRect.height) + extraH,
+    hasOverflow: false,
   };
 }
 
-async function renderCanvas(element: HTMLElement, scale: number) {
+async function renderCanvas(element: HTMLElement, scale: number, paperSize?: "a4" | "f4") {
   const html2canvas = (await import("html2canvas")).default;
-  const extent = measureMaxContentExtent(element);
+  const extent = measureContentExtent(element, paperSize);
+
+  // Jika ada overflow, tambahkan padding
+  const padding = extent.hasOverflow ? 50 : 0;
+  const renderWidth = extent.width + padding;
+  const renderHeight = extent.height + padding;
+
   return html2canvas(element, {
     scale,
     backgroundColor: null,
     useCORS: true,
     logging: false,
-    width: extent.width,
-    height: extent.height,
-    windowWidth: extent.width,
-    windowHeight: extent.height,
+    width: renderWidth,
+    height: renderHeight,
+    windowWidth: renderWidth,
+    windowHeight: renderHeight,
     onclone: (doc) => {
       const cloned = doc.body.querySelector("[data-export-root='true']");
       if (cloned instanceof HTMLElement) {
-        // Ensure overflow content isn't clipped during capture.
+        // Reset dan set ukuran yang tepat
         cloned.style.overflow = "visible";
-        cloned.style.width = `${extent.width}px`;
-        cloned.style.height = `${extent.height}px`;
+        cloned.style.width = `${renderWidth}px`;
+        cloned.style.height = `${renderHeight}px`;
         cloned.style.maxWidth = "none";
         cloned.style.maxHeight = "none";
+        cloned.style.minWidth = "none";
+        cloned.style.minHeight = "none";
         (cloned.style as any).aspectRatio = "auto";
+
+        // Tambahkan padding jika overflow
+        if (extent.hasOverflow) {
+          cloned.style.padding = "20px";
+          cloned.style.boxSizing = "border-box";
+        }
 
         // Make sure the cloned document itself doesn't clip.
         doc.documentElement.style.overflow = "visible";
         doc.body.style.overflow = "visible";
         doc.body.style.margin = "0";
-        doc.body.style.width = `${extent.width}px`;
-        doc.body.style.height = `${extent.height}px`;
+        doc.body.style.width = `${renderWidth}px`;
+        doc.body.style.height = `${renderHeight}px`;
+        doc.body.style.padding = "0";
 
         normalizeUnsupportedColors(cloned);
       }
@@ -144,9 +204,10 @@ export async function exportElementAsImage(
     format: ImageFormat;
     scale?: number;
     jpegQuality?: number;
+    paperSize?: "a4" | "f4";
   },
 ) {
-  const canvas = await renderCanvas(element, opts.scale ?? 4);
+  const canvas = await renderCanvas(element, opts.scale ?? 4, opts.paperSize);
 
   const mime = opts.format === "png" ? "image/png" : "image/jpeg";
   const quality = opts.format === "png" ? undefined : (opts.jpegQuality ?? 0.95);
@@ -177,8 +238,30 @@ export async function exportElementAsPdf(
     paperSize?: "a4" | "f4";
   },
 ) {
-  const canvas = await renderCanvas(element, opts.scale ?? 4);
-  const imgData = canvas.toDataURL("image/jpeg", 0.98);
+  const canvas = await renderCanvas(element, opts.scale ?? 4, opts.paperSize);
+
+  // Gunakan PNG untuk kualitas lebih baik, lalu kompres ke JPEG
+  const imgData = canvas.toDataURL("image/png");
+
+  // Konversi PNG ke JPEG dengan kualitas tinggi untuk PDF
+  const jpegData = await new Promise<string>((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const tempCanvas = document.createElement("canvas");
+      tempCanvas.width = canvas.width;
+      tempCanvas.height = canvas.height;
+      const ctx = tempCanvas.getContext("2d");
+      if (ctx) {
+        ctx.fillStyle = "#FFFFFF";
+        ctx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+        ctx.drawImage(img, 0, 0);
+        resolve(tempCanvas.toDataURL("image/jpeg", 0.98));
+      } else {
+        resolve(imgData);
+      }
+    };
+    img.src = imgData;
+  });
 
   const { jsPDF } = await import("jspdf");
 
@@ -210,7 +293,7 @@ export async function exportElementAsPdf(
   const x = (pageWidth - renderWidth) / 2;
   const y = (pageHeight - renderHeight) / 2;
 
-  pdf.addImage(imgData, "JPEG", x, y, renderWidth, renderHeight, undefined, "FAST");
+  pdf.addImage(jpegData, "JPEG", x, y, renderWidth, renderHeight);
 
   // Prefer Blob download for stability.
   const blob = pdf.output("blob");

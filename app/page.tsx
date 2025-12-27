@@ -7,6 +7,9 @@ import { CertificateCanvas } from "@/components/certificate-canvas";
 import { Toolbar } from "@/components/toolbar";
 import { createRandomDesign, type DesignState } from "@/lib/design";
 import { exportElementAsImage, exportElementAsPdf } from "@/lib/export";
+import { getTemplate, getDefaultInstruction } from "@/lib/prompt-templates";
+import { validateHtmlStructure, analyzeHtmlQuality, extractMetadata, withRetry, getFallbackTemplate } from "@/lib/validation";
+import { filterBackticks, extractHtmlFromAiResponse } from "@/lib/validation-filter";
 
 // Reuse color sanitization helper from export.ts
 function replaceUnsupportedCssColors(input: string) {
@@ -25,6 +28,50 @@ function replaceUnsupportedCssColors(input: string) {
       return match;
     }
   });
+}
+
+// Fungsi untuk menyembunyikan teks dalam HTML tanpa merusak struktur
+function hideTextInHtml(html: string): string {
+  if (!html) return html;
+
+  try {
+    // Parse HTML menggunakan DOMParser
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+
+    // Temukan semua elemen yang mengandung teks
+    const textElements = doc.querySelectorAll("p, span, div, h1, h2, h3, h4, h5, h6, li, td, th, label, button, a");
+
+    textElements.forEach((el) => {
+      // Cek apakah elemen ini hanya mengandung teks atau elemen lain
+      const hasTextContent = el.textContent && el.textContent.trim().length > 0;
+      const hasOnlyText = Array.from(el.childNodes).every(node =>
+        node.nodeType === Node.TEXT_NODE ||
+        (node.nodeType === Node.ELEMENT_NODE &&
+          (node as Element).tagName.toLowerCase() === 'br')
+      );
+
+      if (hasTextContent && hasOnlyText) {
+        // Tambahkan style untuk menyembunyikan teks
+        const currentStyle = el.getAttribute("style") || "";
+        const newStyle = currentStyle + "; color: transparent !important; opacity: 0 !important; user-select: none !important;";
+        el.setAttribute("style", newStyle);
+      }
+    });
+
+    // Juga sembunyikan teks dalam SVG text elements
+    const svgTextElements = doc.querySelectorAll("text, tspan");
+    svgTextElements.forEach((el) => {
+      const currentStyle = el.getAttribute("style") || "";
+      const newStyle = currentStyle + "; fill: transparent !important; opacity: 0 !important;";
+      el.setAttribute("style", newStyle);
+    });
+
+    return doc.body.innerHTML;
+  } catch (e) {
+    console.error("Error hiding text:", e);
+    return html;
+  }
 }
 
 type OpenRouterModel = {
@@ -56,6 +103,7 @@ const STORAGE_KEY = {
   zaiModel: "sertifikat2.zai.model",
   certData: "sertifikat2.certificate.data",
   paperSize: "sertifikat2.certificate.paperSize",
+  hideText: "sertifikat2.certificate.hideText",
 } as const;
 
 function getPaperSpec(paper: PaperSize) {
@@ -164,7 +212,7 @@ function buildPrompt(seed: number, data: CertificateData, paper: PaperSize) {
     "MUST use export-compatible colors (ONLY hex / rgb() / rgba()). Do NOT use oklab(), oklch(), lab(), lch(), or color().",
     "IMPORTANT (SAFE AREA): all text MUST stay inside the content area (safe area) to avoid being clipped by the frame.",
     "Safe area rule: create a main content container with at least 6% padding from all sides (e.g., inset:6% or padding:6%).",
-    "Main content container must be: box-sizing:border-box; max-width:100%; max-height:100%; overflow:hidden.",
+    "Main content container must be: box-sizing:border-box; max-width:100%; max-height:100%; overflow:hidden;",
     "All text blocks must have max-width:100% and use word-break:break-word + overflow-wrap:anywhere.",
     "Avoid position absolute for long text; use flex/column layout so height adapts and stays within safe area.",
     "NO OVERFLOW: ensure no text spills outside the paper area. If content is too long, reduce font-size, line-height, and block spacing until everything fits.",
@@ -175,6 +223,8 @@ function buildPrompt(seed: number, data: CertificateData, paper: PaperSize) {
     `Canvas considered ${spec.widthPx}x${spec.heightPx} (landscape). Aspect ratio ~${spec.widthMm}:${spec.heightMm}.`,
     "Use % based positioning and sizing for responsiveness.",
     `Variation seed: ${seed}.`,
+    "IMPORTANT: Limit text content to fit within 90% of paper width and 85% of paper height to prevent overflow.",
+    "If user instruction contains long text, reduce font sizes proportionally: main text 14-18px, headings 20-28px, names 24-32px.",
     "Interpret the following user markdown instruction to fill the certificate text; respect newlines and symbols that may carry meaning (render according to user intent, do not invent new data):",
     data.instruction?.trim() ? data.instruction.trim() : "(instruction empty)",
     "Output must be a single root element:",
@@ -230,6 +280,23 @@ export default function Page() {
   });
   const paperSpec = React.useMemo(() => getPaperSpec(paperSize), [paperSize]);
 
+  const [hideText, setHideText] = React.useState<boolean>(() => {
+    const stored = safeGetLocalStorage(STORAGE_KEY.hideText);
+    return stored === "true";
+  });
+
+  const [generationStatus, setGenerationStatus] = React.useState<{
+    step: string;
+    progress: number;
+    quality: string;
+    suggestions: string[];
+  } | null>(null);
+
+  const [useDefaultData, setUseDefaultData] = React.useState<boolean>(() => {
+    const stored = safeGetLocalStorage("sertifikat2.useDefaultData");
+    return stored === "true";
+  });
+
   const [certificateData, setCertificateData] = React.useState<CertificateData>(() => {
     const storedRaw = safeGetLocalStorage(STORAGE_KEY.certData);
     const stored = safeParseJson<any>(storedRaw);
@@ -257,6 +324,14 @@ export default function Page() {
   React.useEffect(() => {
     safeSetLocalStorage(STORAGE_KEY.paperSize, paperSize);
   }, [paperSize]);
+
+  React.useEffect(() => {
+    safeSetLocalStorage(STORAGE_KEY.hideText, hideText.toString());
+  }, [hideText]);
+
+  React.useEffect(() => {
+    safeSetLocalStorage("sertifikat2.useDefaultData", useDefaultData.toString());
+  }, [useDefaultData]);
 
   React.useEffect(() => {
     safeSetLocalStorage(STORAGE_KEY.provider, provider);
@@ -346,6 +421,28 @@ export default function Page() {
   async function withCanvas(action: (el: HTMLElement) => Promise<void>) {
     const el = canvasRef.current;
     if (!el) return;
+
+    // Validasi ukuran konten sebelum export
+    const rect = el.getBoundingClientRect();
+    const nodes = el.querySelectorAll<HTMLElement>("*");
+    let hasOverflow = false;
+
+    for (const node of nodes) {
+      const nodeRect = node.getBoundingClientRect();
+      if (nodeRect.right > rect.right + 20 || nodeRect.bottom > rect.bottom + 20) {
+        hasOverflow = true;
+        break;
+      }
+    }
+
+    if (hasOverflow) {
+      const confirmExport = confirm(
+        "Peringatan: Konten terdeteksi overflow mungkin tidak tercetak dengan benar. \n" +
+        "Apakah Anda tetap ingin melanjutkan export?"
+      );
+      if (!confirmExport) return;
+    }
+
     setBusy(true);
     try {
       await action(el);
@@ -360,37 +457,151 @@ export default function Page() {
     }
 
     setAiError(null);
+    setGenerationStatus(null);
     setBusy(true);
+
     try {
-      const prompt = buildPrompt(design.seed, certificateData, paperSize);
-      const url =
-        provider === "openrouter" ? "/api/openrouter/generate" : "/api/zai/generate";
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey, model: modelId, prompt }),
+      // Step 1: Build enhanced prompt
+      setGenerationStatus({
+        step: "Mempersiapkan prompt premium...",
+        progress: 10,
+        quality: "premium",
+        suggestions: []
       });
-      const json = await res.json();
-      if (!res.ok) {
-        const msg =
-          typeof json?.details === "string" && json.details
-            ? json.details
-            : typeof json?.error === "string" && json.error
-              ? json.error
-              : "AI request failed";
-        const hint = typeof json?.hint === "string" ? json.hint : "";
-        throw new Error(hint ? `${msg}\n${hint}` : msg);
+
+      const template = getTemplate("premium");
+      const paperSpec = getPaperSpec(paperSize);
+
+      // Use default data if toggle is enabled
+      const instruction = useDefaultData
+        ? getDefaultInstruction()
+        : certificateData.instruction;
+
+      const prompt = template.buildPrompt({
+        instruction,
+        seed: design.seed,
+        paperSize,
+        paperSpec
+      });
+
+      // Step 2: Call API with retry mechanism
+      setGenerationStatus({
+        step: "Menghubungi AI (retry otomatis jika gagal)...",
+        progress: 30,
+        quality: "premium",
+        suggestions: []
+      });
+
+      const url = provider === "openrouter" ? "/api/openrouter/generate" : "/api/zai/generate";
+
+      // Use retry wrapper
+      const result = await withRetry(async () => {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            apiKey,
+            model: modelId,
+            prompt,
+            quality: "premium",
+            paperSize,
+            paperSpec
+          }),
+        });
+
+        const json = await res.json();
+        if (!res.ok) {
+          throw new Error(json.error || "AI request failed");
+        }
+
+        return json;
+      }, 3); // 3 retries untuk premium
+
+      // Step 3: Filter backticks and validate HTML structure
+      setGenerationStatus({
+        step: "Memvalidasi hasil generate...",
+        progress: 70,
+        quality: "premium",
+        suggestions: []
+      });
+
+      const rawHtml = typeof result.html === "string" ? result.html : "";
+      // Filter backticks dari hasil AI
+      const filteredHtml = filterBackticks(rawHtml);
+      const validation = validateHtmlStructure(filteredHtml);
+
+      if (!validation.isValid) {
+        throw new Error(`HTML validation failed:\n${validation.errors.join("\n")}`);
       }
 
-      const rawHtml = typeof json?.html === "string" ? json.html : "";
-      const sanitizedColors = replaceUnsupportedCssColors(rawHtml);
+      // Step 4: Sanitize and analyze quality
+      setGenerationStatus({
+        step: "Menganalisis kualitas dan menyempurnakan...",
+        progress: 85,
+        quality: "premium",
+        suggestions: []
+      });
+
+      const sanitizedColors = replaceUnsupportedCssColors(validation.sanitizedHtml);
       const clean = DOMPurify.sanitize(sanitizedColors, {
         USE_PROFILES: { html: true, svg: true, svgFilters: true },
       });
+
+      // Analyze quality
+      const qualityAnalysis = analyzeHtmlQuality(clean);
+      const metadata = extractMetadata(clean);
+
+      // Step 5: Apply text hiding if needed
+      setGenerationStatus({
+        step: "Menyelesaikan...",
+        progress: 95,
+        quality: `${qualityAnalysis.quality} (${qualityAnalysis.score}/100)`,
+        suggestions: qualityAnalysis.suggestions
+      });
+
       setAiHtmlOriginal(clean);
-      setAiHtml(clean);
+
+      if (hideText) {
+        setAiHtml(hideTextInHtml(clean));
+      } else {
+        setAiHtml(clean);
+      }
+
+      // Show success with quality info
+      setTimeout(() => {
+        setGenerationStatus({
+          step: "✅ Generate selesai!",
+          progress: 100,
+          quality: `${qualityAnalysis.quality} (${qualityAnalysis.score}/100)`,
+          suggestions: qualityAnalysis.suggestions
+        });
+      }, 500);
+
+      // Auto-clear status after 8 seconds
+      setTimeout(() => {
+        setGenerationStatus(null);
+      }, 8000);
+
     } catch (e) {
-      setAiError(e instanceof Error ? e.message : "AI request failed");
+      const errorMsg = e instanceof Error ? e.message : "AI request failed";
+
+      // If validation fails, try fallback
+      if (errorMsg.includes("validation failed") || errorMsg.includes("HTML validation")) {
+        setGenerationStatus({
+          step: "Mencoba template fallback...",
+          progress: 50,
+          quality: "fallback",
+          suggestions: ["Menggunakan template dasar jika AI error"]
+        });
+
+        const fallback = getFallbackTemplate(certificateData.instruction, getPaperSpec(paperSize));
+        setAiHtmlOriginal(fallback);
+        setAiHtml(fallback);
+
+        setAiError(`⚠️ Hasil generate tidak valid, menggunakan template fallback.\nError: ${errorMsg}`);
+      } else {
+        setAiError(errorMsg);
+      }
     } finally {
       setBusy(false);
     }
@@ -423,7 +634,7 @@ export default function Page() {
 
   function printAiHtml() {
     if (!aiHtmlOriginal) return;
-    
+
     // Create a new window for printing
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
@@ -492,6 +703,43 @@ export default function Page() {
     printWindow.document.close();
   }
 
+  // Fungsi untuk mendownload HTML dengan teks yang sudah disembunyikan
+  function downloadAiHtmlWithoutText() {
+    if (!aiHtmlOriginal) return;
+    const htmlWithoutText = hideTextInHtml(aiHtmlOriginal);
+    const doc = [
+      "<!doctype html>",
+      "<html>",
+      "<head>",
+      "<meta charset=\"utf-8\" />",
+      "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />",
+      "<title>Sertifikat - Tanpa Teks</title>",
+      "</head>",
+      "<body style=\"margin:0;padding:0;background:#f4f4f5;\">",
+      "<div style=\"max-width:1200px;margin:24px auto;padding:0 16px;\">",
+      `<div style=\"width:100%;aspect-ratio:${paperSpec.widthMm}/${paperSpec.heightMm};\">`,
+      htmlWithoutText,
+      "</div>",
+      "</div>",
+      "</body>",
+      "</html>",
+    ].join("\n");
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    downloadHtmlString(doc, `sertifikat-ai-no-text-${stamp}.html`);
+  }
+
+  // Update aiHtml when hideText changes
+  React.useEffect(() => {
+    if (aiHtmlOriginal) {
+      if (hideText) {
+        setAiHtml(hideTextInHtml(aiHtmlOriginal));
+      } else {
+        setAiHtml(aiHtmlOriginal);
+      }
+    }
+  }, [hideText, aiHtmlOriginal]);
+
   return (
     <div className="min-h-dvh bg-zinc-50">
       <div className="mx-auto max-w-full px-40 py-10">
@@ -510,6 +758,8 @@ export default function Page() {
           onGenerate={() => void generateWithAi()}
           onDownloadHtml={downloadAiHtml}
           canDownloadHtml={Boolean(aiHtmlOriginal)}
+          onDownloadHtmlWithoutText={downloadAiHtmlWithoutText}
+          canDownloadHtmlWithoutText={Boolean(aiHtmlOriginal)}
           onPrint={printAiHtml}
           canPrint={Boolean(aiHtmlOriginal)}
           onDownloadPdf={() =>
@@ -540,6 +790,9 @@ export default function Page() {
               }),
             )
           }
+          generationStatus={generationStatus}
+          useDefaultData={useDefaultData}
+          onDefaultDataChange={setUseDefaultData}
         />
 
         {aiError ? (
@@ -547,6 +800,29 @@ export default function Page() {
             {aiError}
           </div>
         ) : null}
+
+        {generationStatus && generationStatus.progress === 100 && (
+          <div className="mt-3 rounded-lg border border-green-200 bg-green-50 p-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-semibold text-green-900">
+                {generationStatus.step}
+              </span>
+              <span className="text-xs font-bold text-green-700 bg-green-200 px-2 py-1 rounded">
+                {generationStatus.quality}
+              </span>
+            </div>
+            {generationStatus.suggestions.length > 0 && (
+              <div className="text-xs text-green-800 mt-2">
+                <strong>💡 Saran perbaikan:</strong>
+                <ul className="list-disc list-inside mt-1 space-y-1">
+                  {generationStatus.suggestions.slice(0, 3).map((s, i) => (
+                    <li key={i}>{s}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="mt-6 rounded-2xl border border-black/8 bg-white p-4">
           <div className="grid gap-4 md:grid-cols-2">
@@ -608,9 +884,8 @@ export default function Page() {
                               setModelQuery(m.id);
                               setModelOpen(false);
                             }}
-                            className={`w-full px-3 py-2 text-left text-sm hover:bg-black/4 ${
-                              modelId === m.id ? "bg-black/4" : ""
-                            }`}
+                            className={`w-full px-3 py-2 text-left text-sm hover:bg-black/4 ${modelId === m.id ? "bg-black/4" : ""
+                              }`}
                           >
                             <div className="font-medium text-black">{m.id}</div>
                             {m.name ? (
@@ -630,7 +905,7 @@ export default function Page() {
 
               <p className="mt-1 text-xs text-zinc-600">Terpilih: {modelId || "-"}</p>
             </div>
-            
+
             <div>
               <label className="text-sm font-medium text-black">Ukuran Kertas</label>
               <select
@@ -645,6 +920,30 @@ export default function Page() {
                 Pilihan ini mempengaruhi arahan prompt AI, preview, dan ukuran halaman PDF.
               </p>
             </div>
+
+            <div className="md:col-span-2">
+              <label className="flex items-center gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={hideText}
+                  onChange={(e) => setHideText(e.target.checked)}
+                  className="h-5 w-5 rounded border-black/12 text-black focus:ring-black/10"
+                />
+                <span className="text-sm font-medium text-black">Sembunyikan Teks dari Hasil AI</span>
+              </label>
+              <p className="mt-1 text-xs text-zinc-600">
+                Toggle ini akan menyembunyikan teks pada preview dan export, tapi tidak menghapus teks dari HTML original.
+              </p>
+              {aiHtmlOriginal && (
+                <button
+                  type="button"
+                  onClick={downloadAiHtmlWithoutText}
+                  className="mt-2 h-9 rounded-md border border-black/12 bg-white px-4 text-sm text-black hover:bg-black/4 focus:outline-none focus:ring-2 focus:ring-black/10"
+                >
+                  Download HTML Tanpa Teks
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
@@ -654,14 +953,30 @@ export default function Page() {
               <h2 className="text-sm font-medium text-black">Data Sertifikat</h2>
               <p className="mt-1 text-xs text-zinc-600">Isi data peserta dan kegiatan untuk di-generate oleh AI.</p>
             </div>
-            <button
-              type="button"
-              onClick={() => setCertFormOpen(true)}
-              className="h-9 rounded-md border border-black/12 bg-white px-4 text-sm text-black hover:bg-black/4 focus:outline-none focus:ring-2 focus:ring-black/10"
-            >
-              Isi Data
-            </button>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={useDefaultData}
+                  onChange={(e) => setUseDefaultData(e.target.checked)}
+                  className="h-4 w-4 rounded border-black/12 text-black focus:ring-black/10"
+                />
+                <span className="text-xs font-medium text-black">Gunakan Data Default</span>
+              </label>
+              <button
+                type="button"
+                onClick={() => setCertFormOpen(true)}
+                className="h-9 rounded-md border border-black/12 bg-white px-4 text-sm text-black hover:bg-black/4 focus:outline-none focus:ring-2 focus:ring-black/10"
+              >
+                Isi Data
+              </button>
+            </div>
           </div>
+          {useDefaultData && (
+            <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900">
+              <strong>ℹ️ Menggunakan data default Indonesia:</strong> Sertifikat akan di-generate dengan contoh data lengkap (SERTIFIKAT, ANDI SAPUTRA, S.Kom., SMK NEGERI 1 JAKARTA, dll.)
+            </div>
+          )}
         </div>
 
         {certFormOpen ? (
@@ -691,14 +1006,14 @@ export default function Page() {
                     rows={10}
                     placeholder={
                       "Contoh:\n" +
-                      "Nomor: 400.3.7.4/04.8606/DISDIK\n" +
-                      "Nama peserta: ASDAR SYAM, S.Pd.\n" +
-                      "Asal instansi: UPTD SMPN 39 SINJAI\n" +
-                      "Sebagai: NARASUMBER\n" +
-                      "Lokasi/Tanggal: Kabupaten Sinjai, 17 Oktober 2025\n" +
-                      "Penandatangan: IRWAN SUAIB, S.STP., M.Si\n" +
-                      "Jabatan: Kepala Dinas Pendidikan Kab. Sinjai\n" +
-                      "NIP: 19790322 199912 1 001\n" +
+                      "Nomor: 001.2025/X/SCERT\n" +
+                      "Nama peserta: ANDI SAPUTRA, S.Kom.\n" +
+                      "Asal instansi: SMK NEGERI 1 JAKARTA\n" +
+                      "Sebagai: PESERTA\n" +
+                      "Lokasi/Tanggal: Jakarta, 15 Desember 2025\n" +
+                      "Penandatangan: Drs. BUDIANTO, M.Pd.\n" +
+                      "Jabatan: Kepala Dinas Pendidikan Provinsi\n" +
+                      "NIP: 19801231 200501 2 001\n" +
                       "Preferensi: teks terpusat, rapi, tidak overflow, nama peserta max 35px."
                     }
                     className="mt-1 w-full rounded-md border border-black/12 px-3 py-2 text-sm text-black placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-black/10"
